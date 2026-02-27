@@ -8,6 +8,7 @@ from typing import Optional
 
 import ray
 import torch
+import yaml
 from direct_transport.conftest import (
     start_datasystem,
     start_etcd,
@@ -67,6 +68,13 @@ def compute_total_size(tensor_size: int) -> float:
     return total_size_gb
 
 
+def load_config_from_file(config_file: str) -> dict:
+    """Load configuration from YAML file."""
+    with open(config_file, "r") as f:
+        config = yaml.safe_load(f)
+    return config or {}
+
+
 # TODO: support more configurations (Currently only YR with NPU is supported) and config file parsing
 def parse_args() -> dict:
     """
@@ -82,7 +90,7 @@ def parse_args() -> dict:
             "type": str,
             "choices": ["yr", "hccl"],
             "required": True,
-            "help": "Transport backend: 'yr' for YR Direct Transport, 'hccl' for HCCL."
+            "help": "Transport backend: 'yr' for YR Direct Transport, 'hccl' for HCCL.",
         },
         {
             "name": "--placement",
@@ -97,49 +105,49 @@ def parse_args() -> dict:
                 "on head node: `ray start --head --resources='{\"node:<HEAD_IP>\": 1}'`; \n"
                 "on worker node: `ray start --address <HEAD_IP>:6379 --resources='{\"node:<WORKER_IP>\": 1}'`. \n"
                 "Replace <HEAD_IP> and <WORKER_IP> with actual IPs."
-            )
+            ),
         },
         {
             "name": "--transport",
             "type": str,
             "choices": ["tcp", "rdma", "hccs"],
-            "help": "Transport protocol: 'tcp' or 'rdma' for 'yr'; 'hccs' for 'hccl'."
+            "help": "Transport protocol: 'tcp' or 'rdma' for 'yr'; 'hccs' for 'hccl'.",
         },
         {
             "name": "--device",
             "type": str,
             "choices": ["npu", "cpu"],
             "default": "cpu",
-            "help": "Device to run tensors on: 'npu' or 'cpu'."
+            "help": "Device to run tensors on: 'npu' or 'cpu'.",
         },
         {
             "name": "--head-node-ip",
             "type": str,
-            "help": "IP address of the Ray head node. Required in 'remote' mode; driver must run on head node."
+            "help": "IP address of the Ray head node. Required in 'remote' mode; driver must run on head node.",
         },
         {
             "name": "--worker-node-ip",
             "type": str,
-            "help": "IP address of the worker node. Required in 'remote' mode."
+            "help": "IP address of the worker node. Required in 'remote' mode.",
         },
         {
             "name": "--tensor-size",
             "type": int,
             "default": 1024,
-            "help": "Total number of elements in the tensor to transport (default: 1024)."
+            "help": "Total number of elements in the tensor to transport (default: 1024).",
         },
         {
             "name": "--output-format",
             "type": str,
             "choices": ["stdout", "json", "csv"],
             "default": "stdout",
-            "help": "Output format for performance results (default: stdout)."
+            "help": "Output format for performance results (default: stdout).",
         },
         {
             "name": "--warmup-times",
             "type": int,
             "default": 3,
-            "help": "Number of warmup iterations before measurement (default: 3)."
+            "help": "Number of warmup iterations before measurement (default: 3).",
         },
         {
             "name": "--config-file",
@@ -147,21 +155,35 @@ def parse_args() -> dict:
             "help": (
                 "Path to a YAML config file with test parameters. "
                 "Command-line arguments override config file settings."
-            )
+            ),
         },
     ]
 
-    
     parser = argparse.ArgumentParser()
     for arg in arg_configs:
-        parser.add_argument(arg["name"], **{k: v for k, v in arg.items() if k != "name"})
-    args = parser.parse_args()
-    config = vars(args)
+        arg_copy = {k: v for k, v in arg.items() if k != "name"}
+        parser.add_argument(arg["name"], **arg_copy)  # type: ignore[arg-type]
+
+    args_partial, _ = parser.parse_known_args()
+
+    # load config file to defaults if provided, so that command-line args can override them
+    config_defaults = {}
+    if args_partial.config_file:
+        try:
+            config_defaults = load_config_from_file(args_partial.config_file)
+        except (FileNotFoundError, yaml.YAMLError) as e:
+            parser.error(str(e))
+
+    # set defaults and parse final args
+    parser.set_defaults(**config_defaults)
+    final_args = parser.parse_args()
+
+    config = vars(final_args)
     if config["placement"] == "remote":
-    if not config.get("head_node_ip"):
-        parser.error("--head-node-ip is required when --placement=remote")
-    if not config.get("worker_node_ip"):
-        parser.error("--worker-node-ip is required when --placement=remote")
+        if not config.get("head_node_ip"):
+            parser.error("--head-node-ip is required when --placement=remote")
+        if not config.get("worker_node_ip"):
+            parser.error("--worker-node-ip is required when --placement=remote")
     logger.info(f"Test configuration:\n{OmegaConf.to_yaml(config)}")
     return config
 
@@ -228,7 +250,13 @@ class WorkerActor:
         # TODO: enhance robustness of device setting
         torch.npu.set_device(0)
 
-    def setup_yr_ds(self, etcd_addr: str, *, worker_host: Optional[str] = None, connect_only_info: Optional[tuple] = None):
+    def setup_yr_ds(
+        self,
+        etcd_addr: str,
+        *,
+        worker_host: Optional[str] = None,
+        connect_only_info: Optional[tuple] = None,
+    ):
         # If an etcd address is provided, use it; otherwise start a local etcd
         self.worker_host = self.worker_port = None
         if connect_only_info is None:
@@ -288,7 +316,7 @@ class HCCLTransportBandwidthTester:
 
 @decorate_with_transport("YR")
 class YRDirectTransportBandwidthTester:
-    def __init__(self, config, remote_mode=False):
+    def __init__(self, config, remote_mode="local"):
         self.config = config
         self.remote_mode = remote_mode
         self._initialize_data_system()
@@ -302,13 +330,17 @@ class YRDirectTransportBandwidthTester:
                 resources={f"node:{HEAD_NODE_IP}": 0.001, "NPU": 1}
             ).remote(self.config, HEAD_NODE_IP)
             ray.get(
-                self.writer_actor.setup_yr_ds.remote(getattr(self, "_etcd_addr", None), worker_host=HEAD_NODE_IP)
+                self.writer_actor.setup_yr_ds.remote(
+                    getattr(self, "_etcd_addr", None), worker_host=HEAD_NODE_IP
+                )
             )
             self.reader_actor = WorkerActor.options(
                 resources={f"node:{WORKER_NODE_IP}": 0.001, "NPU": 1}
             ).remote(self.config, WORKER_NODE_IP)
             ray.get(
-                self.reader_actor.setup_yr_ds.remote(getattr(self, "_etcd_addr", None), worker_host=WORKER_NODE_IP)
+                self.reader_actor.setup_yr_ds.remote(
+                    getattr(self, "_etcd_addr", None), worker_host=WORKER_NODE_IP
+                )
             )
         else:
             logger.info("Initializing data system client in local mode...")
