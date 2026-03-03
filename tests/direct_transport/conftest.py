@@ -10,9 +10,20 @@ from typing import Optional
 
 import pytest
 import requests
-from yr import datasystem
+
+try:
+    from yr import datasystem
+
+    YR_AVAILABLE = True
+except ImportError:
+    YR_AVAILABLE = False
+
 
 logger = logging.getLogger(__name__)
+
+
+def check_dscli_available() -> bool:
+    return shutil.which("dscli") is not None
 
 
 def get_free_port():
@@ -155,6 +166,11 @@ def start_etcd_and_yr():
     Automatically shut down after tests.
     Yields (worker_host, worker_port).
     """
+    if not YR_AVAILABLE:
+        pytest.skip("yr library (yuanrong) not available, skipping YR tests")
+    if not check_dscli_available():
+        pytest.skip("dscli tool not available, skipping YR tests")
+
     etcd_proc = etcd_data_dir = None
     worker_host = worker_port = None
     try:
