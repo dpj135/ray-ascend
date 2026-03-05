@@ -11,14 +11,14 @@ pip install pre-commit
 pre-commit install
 
 # set local configuration
-git config user.name ""
-git config user.email ""
+git config user.name "Your Name"
+git config user.email "your.email@example.com"
 
 # commit with signature, and then pre-commit would be triggered
 git commit -s
 ```
 
-For more details about "code style" , please refer to the following:
+For details about code style, please refer to the following:
 #### Code style
 Class naming style uses upper camelCase, for examples:
 ```python
@@ -30,9 +30,12 @@ class YRTensorTransport:
 
 Local variables and methods use snake_case, for examples:
 ```python
-
 def get_communicator_metadata():
     ...
+
+class MyCollectiveGroup:
+    def send_tensor(self):
+        ...
 ```
 Global variables and environment variables use upper snake_case, for examples:
 ```python
@@ -62,8 +65,3 @@ pytest -v
 ## Sign Ascend CLA
 When you submit your PR for the first time, please sign the Ascend [CLA ( Contributor License Agreement )](https://clasign.osinfra.cn/sign/690ca9ddf91c03dee6082ab1).
 The email address used to sign the CLA must match the commit signature.
-
-
-## A new ccl
-
-## A new transport

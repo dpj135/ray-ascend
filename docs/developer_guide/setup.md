@@ -1,6 +1,6 @@
 # Setup
 
-We provide installation instructions for yuanrong direct transport and HCCL collective group, and you can selectively install the relevant dependencies as needed.
+We provide installation instructions for YuanRong direct transport and HCCL collective group, and you can selectively install the relevant dependencies as needed.
 
 ### Install CANN
 If you have NPU devices and want to accelerate the transmission of NPU tensor by **YR** or **HCCL**,
@@ -22,7 +22,7 @@ ls /usr/local/Ascend/ascend-toolkit/latest
 ```
 
 Set environment:
-```
+```bash
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 ```
 
@@ -33,7 +33,7 @@ git clone https://github.com/Ascend/ray-ascend.git
 cd ray-ascend
 ```
 ### Install from source codes
-```
+```bash
 pip install -e .
 ```
 
