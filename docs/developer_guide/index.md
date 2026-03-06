@@ -1,6 +1,6 @@
 # Developer Guide
 
-> _last upated: 03/05/2026_
+> _last upated: 03/06/2026_
 
 ## Target
 

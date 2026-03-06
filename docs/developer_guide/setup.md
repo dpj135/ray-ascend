@@ -12,16 +12,17 @@ or **HCCL**, you need to install **Ascend-cann-toolkit**.
 > architecture launched by Huawei for AI scenarios. \
 > HCCL(Huawei Collective Communication Library) is included in CANN.
 
-We recommend developers to develop inside cann container.
+We recommend developers to develop inside CANN container like:
 
 ```bash
+# pull CANN container
 docker pull swr.cn-southwest-2.myhuaweicloud.com/base_image/ascend-ci/cann:8.2.rc1-a3-ubuntu22.04-py3.11
 ```
 
-Please select the appropriate version for your OS and architecture (e.g., Linux +
-AArch64).
+To run a container based on this image, please refer to
+[offical cann image documentations](https://github.com/Ascend/cann-container-image).
 
-After installation, confirm the toolkit path exists:
+After CANN installation, confirm the toolkit path exists:
 
 ```bash
 ls /usr/local/Ascend/ascend-toolkit/latest
