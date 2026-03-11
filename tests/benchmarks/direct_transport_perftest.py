@@ -175,57 +175,42 @@ def parse_args() -> argparse.Namespace:
     return final_args
 
 
-def decorate_with_transport():
-    def decorator(cls):
-        # Class decorator: start a single etcd for the tester instance
-        orig_init = cls.__init__
+class EtcdUtil:
+    """Utility class to manage etcd process and lifecycle."""
 
-        def __init__(self, *args, **kwargs):
-            # Determine remote_mode from args/kwargs (orig_init signature: (self, config, remote_mode=False))
-            remote_mode = kwargs.get("remote_mode", False)
-            if not remote_mode and len(args) >= 2:
-                remote_mode = args[1]
+    def __init__(self, host: str = "127.0.0.1"):
+        """Start etcd process.
 
-            etcd_host = HEAD_NODE_IP if remote_mode == "remote" else None
+        Args:
+            host: The host to bind etcd to. Defaults to "127.0.0.1".
+        """
+        self.etcd_addr, self.etcd_proc, self.etcd_data_dir = start_etcd(host=host)
+        logger.info(f"EtcdUtil initialized with address: {self.etcd_addr}")
 
-            # Start etcd before running original init so _initialize_data_system can use _etcd_addr
-            if etcd_host is not None:
-                etcd_addr, etcd_proc, etcd_data_dir = start_etcd(host=etcd_host)
-            else:
-                etcd_addr, etcd_proc, etcd_data_dir = start_etcd()
-
-            self._etcd_addr = etcd_addr
-            self._etcd_proc = etcd_proc
-            self._etcd_data_dir = etcd_data_dir
-
-            # Now call original initializer which may create actors and use _etcd_addr
-            orig_init(self, *args, **kwargs)
-
-        def _close_etcd(self):
-            if hasattr(self, "_etcd_proc") and self._etcd_proc:
-                try:
-                    self._etcd_proc.terminate()
-                    self._etcd_proc.wait(timeout=5)
-                except Exception:
-                    pass
-            if hasattr(self, "_etcd_data_dir") and self._etcd_data_dir:
-                try:
-                    shutil.rmtree(self._etcd_data_dir, ignore_errors=True)
-                except Exception:
-                    pass
-
-        def __del__(self):
+    def close(self):
+        """Stop etcd process and clean up resources."""
+        if self.etcd_proc:
             try:
-                _close_etcd(self)
-            except Exception:
-                pass
+                self.etcd_proc.terminate()
+                self.etcd_proc.wait(timeout=5)
+                logger.info("Etcd process terminated successfully")
+                self.etcd_proc = None
+            except Exception as e:
+                logger.error(f"Error terminating etcd process: {e}")
 
-        cls.__init__ = __init__
-        cls._close_etcd = _close_etcd
-        cls.__del__ = __del__
-        return cls
+        if self.etcd_data_dir and os.path.exists(self.etcd_data_dir):
+            try:
+                shutil.rmtree(self.etcd_data_dir, ignore_errors=True)
+                logger.info(f"Etcd data directory cleaned up: {self.etcd_data_dir}")
+            except Exception as e:
+                logger.error(f"Error cleaning up etcd data directory: {e}")
 
-    return decorator
+    def __del__(self):
+        """Ensure etcd is closed when object is destroyed."""
+        try:
+            self.close()
+        except Exception:
+            pass
 
 
 @ray.remote
@@ -290,6 +275,9 @@ class TensorTransportActor:
         self.node_ip = node_ip
         self.data: Optional[torch.Tensor] = None
         self.ds_info: Optional[tuple[Optional[str], Optional[int]]] = None
+
+        # if host and port are provided via environment variables, we can skip starting datasystem automatically.
+        # TODO: But etcd will be still started by the test class.
         host = os.getenv("YR_DS_WORKER_HOST")
         port_str = os.getenv("YR_DS_WORKER_PORT")
 
@@ -336,11 +324,15 @@ class HCCLTransportBandwidthTester:
     pass
 
 
-@decorate_with_transport()
 class YRDirectTransportBandwidthTester(RayAscendBandwidthTester):
     def __init__(self, config: argparse.Namespace, remote_mode: str = "local"):
         self.config = config
         self.remote_mode = remote_mode
+
+        # Initialize etcd
+        etcd_host = HEAD_NODE_IP if remote_mode == "remote" else None
+        self.etcd_util = EtcdUtil(host=etcd_host) if etcd_host else EtcdUtil()
+
         self.head_ds_actor: Optional[ray.actor.ActorHandle] = None
         self.worker_ds_actor: Optional[ray.actor.ActorHandle] = None
         self._initialize_data_system()
@@ -348,25 +340,25 @@ class YRDirectTransportBandwidthTester(RayAscendBandwidthTester):
     def _initialize_data_system(self):
         if self.remote_mode == "remote":
             logger.info("Initializing data system client in remote mode...")
-            # etcd is started by the class decorator; pass its address to actors
+            # etcd is started by EtcdUtil; pass its address to actors
             self.head_ds_actor = DataSystemActor.options(  # type: ignore[attr-defined]
                 resources={f"node:{HEAD_NODE_IP}": 0.001, "NPU": 1}
-            ).remote(getattr(self, "_etcd_addr", None), node_ip=HEAD_NODE_IP)
+            ).remote(self.etcd_util.etcd_addr, node_ip=HEAD_NODE_IP)
             self.head_ds_info = ray.get(self.head_ds_actor.start_datasystem.remote())
             self.worker_ds_actor = DataSystemActor.options(  # type: ignore[attr-defined]
                 resources={f"node:{WORKER_NODE_IP}": 0.001, "NPU": 1}
             ).remote(
-                getattr(self, "_etcd_addr", None), node_ip=WORKER_NODE_IP
+                self.etcd_util.etcd_addr, node_ip=WORKER_NODE_IP
             )
             self.worker_ds_info = ray.get(
                 self.worker_ds_actor.start_datasystem.remote()
             )
         else:
             logger.info("Initializing data system client in local mode...")
-            logger.info(f"etcd address is {getattr(self, '_etcd_addr', None)}")
+            logger.info(f"etcd address is {self.etcd_util.etcd_addr}")
             self.head_ds_actor = self.worker_ds_actor = DataSystemActor.options(
                 resources={"NPU": 1}
-            ).remote(getattr(self, "_etcd_addr", None))
+            ).remote(self.etcd_util.etcd_addr)
             self.head_ds_info = self.worker_ds_info = ray.get(
                 self.head_ds_actor.start_datasystem.remote()
             )
@@ -376,7 +368,6 @@ class YRDirectTransportBandwidthTester(RayAscendBandwidthTester):
     ) -> tuple[ray.actor.ActorHandle, ray.actor.ActorHandle]:
         # TODO: support cpu transport test after YR transport supports cpu tensors
         if self.remote_mode == "remote":
-            logger.info("Initializing data system client in remote mode...")
             # etcd is started by the class decorator; pass its address to actors
             writer_actor = TensorTransportActor.options(  # type: ignore[attr-defined]
                 resources={f"node:{HEAD_NODE_IP}": 0.001, "NPU": 1}
@@ -387,8 +378,6 @@ class YRDirectTransportBandwidthTester(RayAscendBandwidthTester):
             ).remote(self.config, WORKER_NODE_IP)
 
         else:
-            logger.info("Initializing data system client in local mode...")
-            logger.info(f"etcd address is {getattr(self, '_etcd_addr', None)}")
             writer_actor = TensorTransportActor.options(resources={"NPU": 1}).remote(  # type: ignore[attr-defined]
                 self.config
             )
@@ -456,10 +445,15 @@ class YRDirectTransportBandwidthTester(RayAscendBandwidthTester):
         )
 
     def close(self):
+        """Close datasystem and cleanup etcd."""
         if self.head_ds_actor:
             ray.get(self.head_ds_actor.stop_datasystem.remote())
         if self.worker_ds_actor and self.worker_ds_actor != self.head_ds_actor:
             ray.get(self.worker_ds_actor.stop_datasystem.remote())
+
+        # Clean up etcd
+        if hasattr(self, "etcd_util"):
+            self.etcd_util.close()
 
 
 def main():
