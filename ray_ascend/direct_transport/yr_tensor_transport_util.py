@@ -69,7 +69,7 @@ class CPUClientAdapter(BaseDSAdapter):
     ENTRY_FMT = "<II"
     ENTRY_SIZE = struct.calcsize(ENTRY_FMT)
 
-    DS_MAX_WORKERS = 2
+    DS_MAX_WORKERS = 8
 
     def __init__(self, host, port):
         if not YR_AVAILABLE:
@@ -172,8 +172,13 @@ class CPUClientAdapter(BaseDSAdapter):
             (target.MutableData(), item)
             for target, item in zip(buffers, items_list, strict=True)
         ]
-        with ThreadPoolExecutor(max_workers=self.DS_MAX_WORKERS) as executor:
-            list(executor.map(lambda p: self.pack_into(*p), tasks))
+        num_workers = min(self.DS_MAX_WORKERS, len(tasks))
+        if num_workers == 1:
+            for p in tasks:
+                self.pack_into(*p)
+        else:
+            with ThreadPoolExecutor(max_workers=num_workers) as executor:
+                list(executor.map(lambda p: self.pack_into(*p), tasks))
         self._client.mset_buffer(buffers)
 
     def get(self, keys: list[str], tensors: list[torch.Tensor]):
