@@ -20,12 +20,12 @@ from ray_ascend.utils import (
     start_etcd,
 )
 
+register_tensor_transport("YR", ["npu", "cpu"], YRTensorTransport)
+
 # Add parent directory to sys.path for importing base_perftest
 sys.path.insert(0, str(Path(__file__).parent))
 
-from base_perftest import RayAscendBandwidthTester
-
-register_tensor_transport("YR", ["npu", "cpu"], YRTensorTransport)
+from base_perftest import RayAscendBaseTester
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -35,11 +35,6 @@ logger = logging.getLogger(__name__)
 
 HEAD_NODE_IP = "NodeA"
 WORKER_NODE_IP = "NodeB"
-
-
-# This is the Medium setting of the performance test.
-# You can modify the parameters according to
-# https://www.yuque.com/haomingzi-lfse7/lhp4el/tml8ke0zkgn6roey?singleDoc#
 
 
 def check_npu_is_available():
@@ -68,7 +63,6 @@ def load_config_from_file(config_file: str) -> dict:
     return config or {}
 
 
-# TODO: support more configurations (Currently only YR with NPU is supported) and config file parsing
 def parse_args() -> argparse.Namespace:
     """
     The following parameters are not currently supported:
@@ -268,9 +262,10 @@ class DataSystemActor:
 
 
 @ray.remote
-class TensorTransportActor:
+class YRTensorTransportActor:
 
     def __init__(self, config: argparse.Namespace, node_ip: Optional[str] = None):
+        register_tensor_transport("YR", ["npu", "cpu"], YRTensorTransport)
         self.config = config
         self.node_ip = node_ip
         self.data: Optional[torch.Tensor] = None
@@ -284,8 +279,9 @@ class TensorTransportActor:
         if host and port_str:
             self.ds_info = (host, int(port_str))
             logger.info(f"DataSystem info loaded from environment: {self.ds_info}")
-        # TODO: enhance robustness of device setting
-        torch.npu.set_device(0)
+
+        if self.config.device == "npu":
+            check_npu_is_available()
 
     def setup_yr_env(self, ds_info: tuple[str, int]):
         """setup environment variables for YR transport"""
@@ -320,11 +316,11 @@ class TensorTransportActor:
         return False
 
 
-class HCCLTransportBandwidthTester:
+class HCCLTransportTester:
     pass
 
 
-class YRDirectTransportBandwidthTester(RayAscendBandwidthTester):
+class YRDirectTransportTester(RayAscendBaseTester):
     def __init__(self, config: argparse.Namespace, remote_mode: str = "local"):
         self.config = config
         self.remote_mode = remote_mode
@@ -338,15 +334,16 @@ class YRDirectTransportBandwidthTester(RayAscendBandwidthTester):
         self._initialize_data_system()
 
     def _initialize_data_system(self):
+        "Initialize data system workers by DataSystemActor and get their info for later use in test actors."
         if self.remote_mode == "remote":
             logger.info("Initializing data system client in remote mode...")
             # etcd is started by EtcdUtil; pass its address to actors
             self.head_ds_actor = DataSystemActor.options(  # type: ignore[attr-defined]
-                resources={f"node:{HEAD_NODE_IP}": 0.001, "NPU": 1}
+                resources={f"node:{HEAD_NODE_IP}": 0.001}
             ).remote(self.etcd_util.etcd_addr, node_ip=HEAD_NODE_IP)
             self.head_ds_info = ray.get(self.head_ds_actor.start_datasystem.remote())
             self.worker_ds_actor = DataSystemActor.options(  # type: ignore[attr-defined]
-                resources={f"node:{WORKER_NODE_IP}": 0.001, "NPU": 1}
+                resources={f"node:{WORKER_NODE_IP}": 0.001}
             ).remote(
                 self.etcd_util.etcd_addr, node_ip=WORKER_NODE_IP
             )
@@ -356,9 +353,9 @@ class YRDirectTransportBandwidthTester(RayAscendBandwidthTester):
         else:
             logger.info("Initializing data system client in local mode...")
             logger.info(f"etcd address is {self.etcd_util.etcd_addr}")
-            self.head_ds_actor = self.worker_ds_actor = DataSystemActor.options(
-                resources={"NPU": 1}
-            ).remote(self.etcd_util.etcd_addr)
+            self.head_ds_actor = self.worker_ds_actor = DataSystemActor.remote(
+                self.etcd_util.etcd_addr
+            )
             self.head_ds_info = self.worker_ds_info = ray.get(
                 self.head_ds_actor.start_datasystem.remote()
             )
@@ -366,49 +363,49 @@ class YRDirectTransportBandwidthTester(RayAscendBandwidthTester):
     def _initialize_test_actor(
         self,
     ) -> tuple[ray.actor.ActorHandle, ray.actor.ActorHandle]:
-        # TODO: support cpu transport test after YR transport supports cpu tensors
         if self.remote_mode == "remote":
-            # etcd is started by the class decorator; pass its address to actors
-            writer_actor = TensorTransportActor.options(  # type: ignore[attr-defined]
+            sender_actor = YRTensorTransportActor.options(  # type: ignore[attr-defined]
                 resources={f"node:{HEAD_NODE_IP}": 0.001, "NPU": 1}
             ).remote(self.config, HEAD_NODE_IP)
 
-            reader_actor = TensorTransportActor.options(  # type: ignore[attr-defined]
+            receiver_actor = YRTensorTransportActor.options(  # type: ignore[attr-defined]
                 resources={f"node:{WORKER_NODE_IP}": 0.001, "NPU": 1}
-            ).remote(self.config, WORKER_NODE_IP)
+            ).remote(
+                self.config, WORKER_NODE_IP
+            )
 
         else:
-            writer_actor = TensorTransportActor.options(resources={"NPU": 1}).remote(  # type: ignore[attr-defined]
+            sender_actor = YRTensorTransportActor.options(resources={"NPU": 1}).remote(  # type: ignore[attr-defined]
                 self.config
             )
-            reader_actor = TensorTransportActor.options(resources={"NPU": 1}).remote(  # type: ignore[attr-defined]
+            receiver_actor = YRTensorTransportActor.options(resources={"NPU": 1}).remote(  # type: ignore[attr-defined]
                 self.config
             )
 
-        ray.get(reader_actor.setup_yr_env.remote(self.worker_ds_info))
-        ray.get(writer_actor.setup_yr_env.remote(self.head_ds_info))
-        return writer_actor, reader_actor
+        ray.get(receiver_actor.setup_yr_env.remote(self.worker_ds_info))
+        ray.get(sender_actor.setup_yr_env.remote(self.head_ds_info))
+        return sender_actor, receiver_actor
 
-    def run_bandwidth_test(self):
-        writer_actor, reader_actor = self._initialize_test_actor()
+    def run_test(self):
+        sender_actor, receiver_actor = self._initialize_test_actor()
         total_data_size_gb = self.config.tensor_size_kb / (
             1000 * 1000
         )  # Convert KB to GB
 
         # warm up
         for i in range(self.config.warmup_times):
-            ray.get(writer_actor.generate_tensor.remote())
-            data_ref = writer_actor.transport_tensor_via_yr.remote()
-            ray.get(reader_actor.recv_tensor.remote(data_ref))
+            ray.get(sender_actor.generate_tensor.remote())
+            data_ref = sender_actor.transport_tensor_via_yr.remote()
+            ray.get(receiver_actor.recv_tensor.remote(data_ref))
 
         # Run actual test for count iterations
         transport_times = []
         logger.info(f"Starting transport operation ({self.config.count} iterations)...")
         for iteration in range(self.config.count):
-            ray.get(writer_actor.generate_tensor.remote())
+            ray.get(sender_actor.generate_tensor.remote())
             start_transport = time.perf_counter()
-            data_ref = writer_actor.transport_tensor_via_yr.remote()
-            ray.get(reader_actor.recv_tensor.remote(data_ref))
+            data_ref = sender_actor.transport_tensor_via_yr.remote()
+            ray.get(receiver_actor.recv_tensor.remote(data_ref))
             end_transport = time.perf_counter()
             transport_time = end_transport - start_transport
             transport_times.append(transport_time)
@@ -417,31 +414,20 @@ class YRDirectTransportBandwidthTester(RayAscendBandwidthTester):
             )
 
         # Calculate statistics
-        avg_transport_time = sum(transport_times) / len(transport_times)
-        min_transport_time = min(transport_times)
-        max_transport_time = max(transport_times)
-        avg_transport_throughput_gbps = (total_data_size_gb * 8) / avg_transport_time
-
-        logger.info(f"Average transport time: {avg_transport_time:.8f}s")
-        logger.info(
-            f"Average Transport Throughput: {avg_transport_throughput_gbps:.8f} Gb/s"
+        latency_percentiles = self.calculate_latency_percentiles(transport_times)
+        throughput_stats = self.calculate_throughput(
+            total_data_size_gb, transport_times
         )
-        time.sleep(2)
 
+        # Log performance summary
         mode_name = f"{self.config.backend.upper()} {self.remote_mode.upper()}"
-        logger.info("=" * 60)
-        logger.info(f"{mode_name} BANDWIDTH TEST SUMMARY")
-        logger.info("=" * 60)
-        logger.info(f"Total Data Size: {total_data_size_gb:.6f} GB")
-        logger.info(f"Number of Iterations: {self.config.count}")
-        logger.info(f"Average Transport Time: {avg_transport_time:.8f}s")
-        logger.info(f"Min Transport Time: {min_transport_time:.8f}s")
-        logger.info(f"Max Transport Time: {max_transport_time:.8f}s")
-        logger.info(
-            f"Average Transport Throughput: {avg_transport_throughput_gbps:.8f} Gb/s"
-        )
-        logger.info(
-            f"Network Round-trip Throughput (avg): {(total_data_size_gb * 8) / avg_transport_time:.8f} Gb/s"
+        self.log_performance_summary(
+            logger=logger,
+            test_name=mode_name,
+            total_data_size_gb=total_data_size_gb,
+            iterations=self.config.count,
+            latency_percentiles=latency_percentiles,
+            throughput_stats=throughput_stats,
         )
 
     def close(self):
@@ -459,19 +445,15 @@ class YRDirectTransportBandwidthTester(RayAscendBandwidthTester):
 def main():
     config = parse_args()
 
-    # TODO: support for remote actor to check NPU device
-    if config.device == "npu":
-        check_npu_is_available()
-
     if config.backend == "yr":
-        tester = YRDirectTransportBandwidthTester(config, remote_mode=config.placement)
+        tester = YRDirectTransportTester(config, remote_mode=config.placement)
     elif config.backend == "hccl":
         raise NotImplementedError("HCCL transport test not implemented yet")
     else:
         raise ValueError(f"Unsupported backend: {config.backend}")
 
     try:
-        tester.run_bandwidth_test()
+        tester.run_test()
     finally:
         tester.close()
 
