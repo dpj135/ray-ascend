@@ -44,6 +44,7 @@ yr = [
     "torch==2.7.1+cpu; platform_machine == 'x86_64'",
     "torch==2.7.1; platform_machine == 'aarch64'",
     "torch-npu==2.7.1.post2",
+    "requests",
 ]
 
 [project.urls]
