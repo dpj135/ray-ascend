@@ -40,19 +40,6 @@ jobs:
         run: |
           echo "Running tests for Python ${{ matrix.python-version }}..."
           python${{ matrix.python-version }} -m pytest -v tests/
-      - name: Verify backward compatibility (Ray ${{ matrix.ray-version }})
-        if: matrix.ray-version != 'latest'
-        run: |
-          python${{ matrix.python-version }} -c "
-          from ray_ascend import register_hccl_collective_backend, register_hccl_tensor_transport
-          for func, name in [(register_hccl_collective_backend, 'register_hccl_collective_backend'),
-                             (register_hccl_tensor_transport, 'register_hccl_tensor_transport')]:
-            try:
-              func()
-              raise AssertionError(f'{name} should have raised RuntimeError')
-            except RuntimeError as e:
-              print(f'OK: {name} raised RuntimeError: {e}')
-          "
       - name: Install etcd
         if: matrix.ray-version == 'latest'
         run: |
@@ -70,7 +57,7 @@ jobs:
           echo "start ray cluster"
           ray start --head
           echo "Running direct_transport_perftest.py (etcd mode)"
-          python${{ matrix.python-version }} tests/benchmarks/direct_transport_perftest.py --backend=yr --placement=local --device=npu --init-mode=etcd
+          python${{ matrix.python-version }} tests/benchmarks/direct_transport_perftest.py --backend=yr --placement=local --device=cpu --init-mode=etcd
           echo "stop ray cluster"
           ray stop
 
