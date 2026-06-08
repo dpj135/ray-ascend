@@ -596,7 +596,7 @@ class HCCLGroup(BaseGroup):
             store_name: the unique store key
             timeout_s: timeout in seconds.
 
-        Return:
+        Returns:
             store_ref: reference to store actor
         """
         if timeout_s <= 0:
@@ -651,7 +651,7 @@ class HCCLGroup(BaseGroup):
             store_ref: reference to the rendezvous store actor.
             timeout_s: timeout in seconds.
 
-        Return:
+        Returns:
             root_info: the HcclRootInfo if successful.
         """
         root_info_bytes = None
